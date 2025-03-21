@@ -75,3 +75,6 @@ def store_news_in_firebase():
 while True:
     store_news_in_firebase()
     time.sleep(1800)
+    if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
