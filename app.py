@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
 from flask import Flask, jsonify
+from urllib.parse import urljoin
 
 # ✅ Initialize Flask App
 app = Flask(__name__)
@@ -31,19 +32,27 @@ NEWS_SOURCES = {
     "Financial Express": "https://www.financialexpress.com/market/"
 }
 
+# ✅ Random User-Agent to bypass blocks
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+}
+
 def scrape_news():
     news_data = []
     
     for source, url in NEWS_SOURCES.items():
         try:
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            print(f"🔍 Scraping {source}...")  # Debugging
+            
+            response = requests.get(url, headers=HEADERS, timeout=10)
             if response.status_code != 200:
-                print(f"❌ Failed to fetch {source}")
+                print(f"❌ Failed to fetch {source} (Status Code: {response.status_code})")
                 continue
             
             soup = BeautifulSoup(response.text, "html.parser")
             articles = []
             
+            # ✅ Update CSS Selectors (Check HTML manually if not working)
             if source == "Economic Times":
                 articles = soup.select(".eachStory h3 a")
             elif source == "CNBC18":
@@ -51,13 +60,17 @@ def scrape_news():
             elif source == "Financial Express":
                 articles = soup.select(".listitembx a")
             
+            if not articles:
+                print(f"❌ No articles found for {source}. Check CSS selectors!")
+                continue
+
             for article in articles[:5]:  # ✅ Get top 5 articles per source
                 title = article.text.strip()
-                link = article.get("href")
-                if not link.startswith("http"):
-                    link = url + link  # ✅ Convert relative URLs to absolute
-                news_data.append({"source": source, "title": title, "link": link})
-        
+                link = urljoin(url, article.get("href"))  # ✅ Fix relative URLs
+
+                if title and link:
+                    news_data.append({"source": source, "title": title, "link": link})
+
         except Exception as e:
             print(f"❌ Error scraping {source}: {str(e)}")
     
@@ -71,7 +84,7 @@ def store_news_in_firebase():
     
     batch = db.batch()
     collection_ref = db.collection("latest_news")
-    
+
     for item in news_items:
         doc_ref = collection_ref.document()
         batch.set(doc_ref, item)
