@@ -1,9 +1,8 @@
 import os
 import json
 import time
-import requests
+import feedparser
 import firebase_admin
-import feedparser  # ✅ Install with: pip install feedparser
 from firebase_admin import credentials, firestore
 from flask import Flask, jsonify
 
@@ -12,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ News API is Running!"
+    return "✅ RSS News API is Running!"
 
 # ✅ Initialize Firebase
 firebase_credentials = os.getenv("FIREBASE_CREDENTIALS")
@@ -24,63 +23,59 @@ if firebase_credentials:
 else:
     raise ValueError("🚨 FIREBASE_CREDENTIALS environment variable is missing!")
 
-# ✅ RSS Feeds
+# ✅ RSS Feeds to Fetch News From
 RSS_FEEDS = {
-    "Economic Times": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "CNBC TV18": "https://www.cnbctv18.com/rss/market.xml",
-    "Financial Express": "https://www.financialexpress.com/feed/"
+    "Moneycontrol": "https://www.moneycontrol.com/rss/latestnews.xml",
+    "NDTV Profit": "https://www.ndtvprofit.com/feed",
+    "LiveMint": "https://www.livemint.com/rss/news.xml"
 }
 
-def fetch_news_from_rss():
-    """Fetches news from RSS feeds."""
+# ✅ Function to Fetch News from RSS Feeds
+def fetch_rss_news():
     news_data = []
-    
-    for source, feed_url in RSS_FEEDS.items():
+    for source, url in RSS_FEEDS.items():
         try:
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(url)
             if not feed.entries:
-                print(f"❌ No news from {source}")
+                print(f"❌ No news found for {source}")
                 continue
-            
-            for entry in feed.entries[:5]:  # ✅ Get top 5 news articles
+
+            for entry in feed.entries[:5]:  # ✅ Get top 5 articles per source
                 news_data.append({
                     "source": source,
                     "title": entry.title,
-                    "link": entry.link
+                    "link": entry.link,
+                    "published": entry.published if "published" in entry else "Unknown"
                 })
-        
         except Exception as e:
             print(f"❌ Error fetching RSS from {source}: {str(e)}")
     
     return news_data
 
+# ✅ Store News in Firebase
 def store_news_in_firebase():
-    """Fetches and stores news in Firebase."""
-    news_items = fetch_news_from_rss()
-    
+    news_items = fetch_rss_news()
     if not news_items:
         print("❌ No news items fetched.")
         return
     
-    print(f"✅ Storing {len(news_items)} news articles in Firebase...")
-
     batch = db.batch()
     collection_ref = db.collection("latest_news")
-    
-    # ✅ Delete old news before storing new ones
-    docs = collection_ref.stream()
-    for doc in docs:
-        batch.delete(doc.reference)
-    
+
+    # ✅ Delete old news before inserting new ones
+    old_docs = collection_ref.stream()
+    for doc in old_docs:
+        doc.reference.delete()
+
+    # ✅ Store new news
     for item in news_items:
-        print(f"📌 Storing: {item}")  # ✅ Debugging Log
         doc_ref = collection_ref.document()
         batch.set(doc_ref, item)
-    
-    batch.commit()
-    print("✅ News stored in Firebase!")
 
-# ✅ Flask API Endpoint to Manually Trigger Scraping
+    batch.commit()
+    print("✅ News updated in Firebase!")
+
+# ✅ Flask API Endpoint to Manually Trigger News Update
 @app.route('/update-news', methods=['GET'])
 def update_news():
     try:
@@ -89,6 +84,7 @@ def update_news():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ API Endpoint to Fetch Latest News
 @app.route('/latest-news', methods=['GET'])
 def get_latest_news():
     try:
@@ -98,7 +94,7 @@ def get_latest_news():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ Background Task: Run Every 30 Minutes
+# ✅ Background Task: Auto Update Every 30 Minutes
 def scheduled_news_update():
     while True:
         store_news_in_firebase()
@@ -107,7 +103,7 @@ def scheduled_news_update():
 # ✅ Run Flask App
 if __name__ == '__main__':
     import threading
-    threading.Thread(target=scheduled_news_update, daemon=True).start()  # ✅ Run in background
+    threading.Thread(target=scheduled_news_update, daemon=True).start()  # ✅ Background Auto-Update
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
