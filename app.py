@@ -10,6 +10,10 @@ from flask import Flask, jsonify
 # ✅ Initialize Flask App
 app = Flask(__name__)
 
+@app.route('/')
+def home():
+    return "✅ News API is Running!"
+
 # ✅ Initialize Firebase
 firebase_credentials = os.getenv("FIREBASE_CREDENTIALS")
 if firebase_credentials:
