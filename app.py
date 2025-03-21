@@ -5,8 +5,12 @@ import requests
 from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
+from flask import Flask, jsonify
 
-# Initialize Firebase
+# ✅ Initialize Flask App
+app = Flask(__name__)
+
+# ✅ Initialize Firebase
 firebase_credentials = os.getenv("FIREBASE_CREDENTIALS")
 if firebase_credentials:
     cred_dict = json.loads(firebase_credentials)
@@ -16,7 +20,7 @@ if firebase_credentials:
 else:
     raise ValueError("🚨 FIREBASE_CREDENTIALS environment variable is missing!")
 
-# News Websites to Scrape
+# ✅ News Websites to Scrape
 NEWS_SOURCES = {
     "Economic Times": "https://economictimes.indiatimes.com/markets",
     "CNBC18": "https://www.cnbctv18.com/market/",
@@ -28,7 +32,7 @@ def scrape_news():
     
     for source, url in NEWS_SOURCES.items():
         try:
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
             if response.status_code != 200:
                 print(f"❌ Failed to fetch {source}")
                 continue
@@ -43,11 +47,11 @@ def scrape_news():
             elif source == "Financial Express":
                 articles = soup.select(".listitembx a")
             
-            for article in articles[:5]:  # Get top 5 articles per source
+            for article in articles[:5]:  # ✅ Get top 5 articles per source
                 title = article.text.strip()
                 link = article.get("href")
                 if not link.startswith("http"):
-                    link = url + link  # Make relative URLs absolute
+                    link = url + link  # ✅ Convert relative URLs to absolute
                 news_data.append({"source": source, "title": title, "link": link})
         
         except Exception as e:
@@ -71,10 +75,34 @@ def store_news_in_firebase():
     batch.commit()
     print("✅ News stored in Firebase!")
 
-# Run every 30 minutes
-while True:
-    store_news_in_firebase()
-    time.sleep(1800)
-    if __name__ == '__main__':
+# ✅ Flask API Endpoint to Manually Trigger Scraping
+@app.route('/update-news', methods=['GET'])
+def update_news():
+    try:
+        store_news_in_firebase()
+        return jsonify({"message": "✅ News updated successfully!"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/latest-news', methods=['GET'])
+def get_latest_news():
+    try:
+        docs = db.collection("latest_news").stream()
+        news_list = [doc.to_dict() for doc in docs]
+        return jsonify(news_list)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ✅ Background Task: Run Every 30 Minutes
+def scheduled_news_update():
+    while True:
+        store_news_in_firebase()
+        time.sleep(1800)  # ✅ Sleep for 30 minutes
+
+# ✅ Run Flask App
+if __name__ == '__main__':
+    import threading
+    threading.Thread(target=scheduled_news_update, daemon=True).start()  # ✅ Run in background
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
