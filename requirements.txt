@@ -1,0 +1,8 @@
+flask
+yfinance
+gunicorn
+flask-cors
+firebase-admin
+requests
+beautifulsoup4
+schedule
