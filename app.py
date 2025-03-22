@@ -1,85 +1,76 @@
-from flask import Flask, jsonify
-from flask_cors import CORS
+import os
+import json
 import requests
-from datetime import datetime, timedelta
 import threading
 import time
-from firebase_admin import credentials, firestore, initialize_app
+from datetime import datetime
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# 🔹 Load Firebase credentials from Render Environment Variables
+firebase_json = os.getenv("FIREBASE_KEY")  # Set this in Render's environment variables
+
+if firebase_json:
+    cred_dict = json.loads(firebase_json)  # Convert string to dictionary
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred)
+else:
+    raise ValueError("❌ Firebase credentials not found in environment variables!")
+
+# 🔹 Firestore Database Instance
+db = firestore.client()
+
+# 🔹 Currency API Configuration
+API_KEY = "fxf_IxSwVBEIZNwwMkh3GyZM"  # Your API key
+API_URL = f"https://api.fxfeed.io/v1/latest?api_key={API_KEY}&base=USD&currencies=INR,EUR,GBP,JPY,AUD"
+
+# 🔹 API Call Limit Management (3000 requests per month)
+REQUESTS_PER_MONTH = 3000
+INTERVAL_SECONDS = (30 * 24 * 60 * 60) / REQUESTS_PER_MONTH  # Time gap per request (~14.4 mins)
+
+def fetch_and_store_currency():
+    """Fetch latest currency exchange rates and store them in Firebase."""
+    try:
+        response = requests.get(API_URL)
+        data = response.json()
+
+        if data.get("success"):
+            currency_data = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "rates": data["rates"]
+            }
+            db.collection("currency_rates").document("latest").set(currency_data)
+            print("✅ Currency data updated in Firestore:", currency_data)
+        else:
+            print("❌ Error fetching currency data:", data)
+
+    except Exception as e:
+        print("⚠️ Exception:", e)
+
+def update_currency_periodically():
+    """Runs the fetch function at fixed intervals."""
+    while True:
+        fetch_and_store_currency()
+        time.sleep(INTERVAL_SECONDS)  # Wait for next API call
+
+# 🔹 Start the currency update process in a background thread
+threading.Thread(target=update_currency_periodically, daemon=True).start()
+
+# 🔹 Flask API to Fetch Data (Optional)
+from flask import Flask, jsonify
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend requests
 
-# 🔥 Firebase Setup
-cred = credentials.Certificate("firebase_credentials.json")  # Replace with your Firebase JSON file
-initialize_app(cred)
-db = firestore.client()
-collection_ref = db.collection("currency_rates")
-
-# 🌍 Currency API Config
-API_KEY = "fxf_IxSwVBEIZNwwMkh3GyZM"
-BASE_CURRENCY = "USD"
-CURRENCIES = "INR,EUR,GBP,JPY,CNY"
-API_URL = f"https://api.fxfeed.io/v1/latest?api_key={API_KEY}&base={BASE_CURRENCY}&currencies={CURRENCIES}"
-
-def fetch_and_store_rates():
-    """Fetches currency rates and stores them in Firebase."""
-    response = requests.get(API_URL)
-    
-    if response.status_code == 200:
-        data = response.json()
-        
-        if data.get("success"):
-            rates = data["rates"]
-            timestamp = datetime.utcnow()
-
-            collection_ref.document("latest").set({
-                "base": BASE_CURRENCY,
-                "rates": rates,
-                "timestamp": timestamp.isoformat()
-            })
-            print("✅ Rates updated:", rates)
-            return rates
-        else:
-            print("❌ API Error:", data)
-            return None
-    else:
-        print("❌ HTTP Error:", response.status_code)
-        return None
-
-def get_cached_rates():
-    """Fetch cached rates if they are recent (within 15 mins)."""
-    doc = collection_ref.document("latest").get()
+@app.route('/get_currency_rates', methods=['GET'])
+def get_currency_rates():
+    """Fetch latest currency rates from Firestore."""
+    doc_ref = db.collection("currency_rates").document("latest")
+    doc = doc_ref.get()
     
     if doc.exists:
-        data = doc.to_dict()
-        last_updated = datetime.fromisoformat(data["timestamp"])
-        time_diff = datetime.utcnow() - last_updated
-
-        if time_diff < timedelta(minutes=15):  # Use cache if data is fresh
-            print("♻️ Using cached rates")
-            return data["rates"]
-    
-    print("🌐 Fetching new rates...")
-    return fetch_and_store_rates()
-
-@app.route("/currency_rates", methods=["GET"])
-def get_currency_rates():
-    """API endpoint for latest currency rates."""
-    rates = get_cached_rates()
-    if rates:
-        return jsonify({"success": True, "base": BASE_CURRENCY, "rates": rates})
+        return jsonify(doc.to_dict())
     else:
-        return jsonify({"success": False, "message": "Failed to fetch rates"}), 500
-
-def background_fetch():
-    """Runs in a separate thread to fetch currency data every 15 minutes."""
-    while True:
-        fetch_and_store_rates()
-        time.sleep(900)  # 900 seconds = 15 minutes
+        return jsonify({"error": "No currency data found"}), 404
 
 if __name__ == "__main__":
-    # Start background thread
-    threading.Thread(target=background_fetch, daemon=True).start()
-    
-    # Run Flask app
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
