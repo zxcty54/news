@@ -1,76 +1,88 @@
 import os
 import json
-import requests
 import threading
 import time
-from datetime import datetime
+import requests
 import firebase_admin
 from firebase_admin import credentials, firestore
-
-# 🔹 Load Firebase credentials from Render Environment Variables
-firebase_json = os.getenv("FIREBASE_KEY")  # Set this in Render's environment variables
-
-if firebase_json:
-    cred_dict = json.loads(firebase_json)  # Convert string to dictionary
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
-else:
-    raise ValueError("❌ Firebase credentials not found in environment variables!")
-
-# 🔹 Firestore Database Instance
-db = firestore.client()
-
-# 🔹 Currency API Configuration
-API_KEY = "fxf_IxSwVBEIZNwwMkh3GyZM"  # Your API key
-API_URL = f"https://api.fxfeed.io/v1/latest?api_key={API_KEY}&base=USD&currencies=INR,EUR,GBP,JPY,AUD"
-
-# 🔹 API Call Limit Management (3000 requests per month)
-REQUESTS_PER_MONTH = 3000
-INTERVAL_SECONDS = (30 * 24 * 60 * 60) / REQUESTS_PER_MONTH  # Time gap per request (~14.4 mins)
-
-def fetch_and_store_currency():
-    """Fetch latest currency exchange rates and store them in Firebase."""
-    try:
-        response = requests.get(API_URL)
-        data = response.json()
-
-        if data.get("success"):
-            currency_data = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "rates": data["rates"]
-            }
-            db.collection("currency_rates").document("latest").set(currency_data)
-            print("✅ Currency data updated in Firestore:", currency_data)
-        else:
-            print("❌ Error fetching currency data:", data)
-
-    except Exception as e:
-        print("⚠️ Exception:", e)
-
-def update_currency_periodically():
-    """Runs the fetch function at fixed intervals."""
-    while True:
-        fetch_and_store_currency()
-        time.sleep(INTERVAL_SECONDS)  # Wait for next API call
-
-# 🔹 Start the currency update process in a background thread
-threading.Thread(target=update_currency_periodically, daemon=True).start()
-
-# 🔹 Flask API to Fetch Data (Optional)
 from flask import Flask, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
-@app.route('/get_currency_rates', methods=['GET'])
+# ✅ Load Firebase credentials from Render environment variable
+firebase_credentials = os.getenv("FIREBASE_CREDENTIALS")
+
+if firebase_credentials:
+    cred_dict = json.loads(firebase_credentials)  # Convert string to dictionary
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+else:
+    raise ValueError("🚨 FIREBASE_CREDENTIALS environment variable is missing!")
+
+# ✅ API Configuration
+API_KEY = "fxf_IxSwVBEIZNwwMkh3GyZM"  # Replace with your actual API key
+BASE_URL = "https://api.fxfeed.io/v1/latest"
+BASE_CURRENCY = "USD"
+CURRENCIES = ["INR", "EUR", "GBP", "JPY"]  # Top 5 currencies including USD
+
+# ✅ Function to Fetch Exchange Rates
+def fetch_exchange_rates():
+    try:
+        # Construct API request URL
+        currencies_str = ",".join(CURRENCIES)
+        url = f"{BASE_URL}?api_key={API_KEY}&base={BASE_CURRENCY}&currencies={currencies_str}"
+        
+        response = requests.get(url)
+        data = response.json()
+
+        if not data.get("success"):
+            print("❌ Error fetching exchange rates:", data)
+            return
+
+        exchange_rates = data["rates"]
+        exchange_rates["base_currency"] = BASE_CURRENCY
+        exchange_rates["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # ✅ Store in Firebase Firestore
+        db.collection("currency_rates").document("latest").set(exchange_rates)
+        
+        print("✅ Exchange rates updated:", exchange_rates)
+
+    except Exception as e:
+        print("❌ Error fetching exchange rates:", str(e))
+
+    # ✅ Auto-update every 15 minutes
+    threading.Timer(900, fetch_exchange_rates).start()  # 900s = 15 min
+
+# ✅ Start Background Update Task
+fetch_exchange_rates()
+
+@app.route('/')
+def home():
+    return "✅ Currency Exchange Rate API is Running!"
+
+@app.route('/update-currency-rates')
+def manual_update():
+    try:
+        fetch_exchange_rates()
+        return jsonify({"message": "✅ Currency exchange rates updated successfully!"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/currency-rates')
 def get_currency_rates():
-    """Fetch latest currency rates from Firestore."""
-    doc_ref = db.collection("currency_rates").document("latest")
-    doc = doc_ref.get()
-    
-    if doc.exists:
-        return jsonify(doc.to_dict())
-    else:
-        return jsonify({"error": "No currency data found"}), 404
+    try:
+        doc = db.collection("currency_rates").document("latest").get()
+        if doc.exists:
+            return jsonify(doc.to_dict())
+        else:
+            return jsonify({"error": "No data available"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
