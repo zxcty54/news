@@ -1,109 +1,85 @@
-import os
-import json
-import time
-import feedparser
-import firebase_admin
-from firebase_admin import credentials, firestore
 from flask import Flask, jsonify
+from flask_cors import CORS
+import requests
+from datetime import datetime, timedelta
+import threading
+import time
+from firebase_admin import credentials, firestore, initialize_app
 
-# ✅ Initialize Flask App
 app = Flask(__name__)
+CORS(app)  # Enable CORS for frontend requests
 
-@app.route('/')
-def home():
-    return "✅ RSS News API is Running!"
+# 🔥 Firebase Setup
+cred = credentials.Certificate("firebase_credentials.json")  # Replace with your Firebase JSON file
+initialize_app(cred)
+db = firestore.client()
+collection_ref = db.collection("currency_rates")
 
-# ✅ Initialize Firebase
-firebase_credentials = os.getenv("FIREBASE_CREDENTIALS")
-if firebase_credentials:
-    cred_dict = json.loads(firebase_credentials)
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-else:
-    raise ValueError("🚨 FIREBASE_CREDENTIALS environment variable is missing!")
+# 🌍 Currency API Config
+API_KEY = "fxf_IxSwVBEIZNwwMkh3GyZM"
+BASE_CURRENCY = "USD"
+CURRENCIES = "INR,EUR,GBP,JPY,CNY"
+API_URL = f"https://api.fxfeed.io/v1/latest?api_key={API_KEY}&base={BASE_CURRENCY}&currencies={CURRENCIES}"
 
-# ✅ RSS Feeds to Fetch News From
-RSS_FEEDS = {
-    "Moneycontrol": "https://www.moneycontrol.com/rss/latestnews.xml",
-    "NDTV Profit": "https://www.ndtvprofit.com/feed",
-    "LiveMint": "https://www.livemint.com/rss/news.xml"
-}
-
-# ✅ Function to Fetch News from RSS Feeds
-def fetch_rss_news():
-    news_data = []
-    for source, url in RSS_FEEDS.items():
-        try:
-            feed = feedparser.parse(url)
-            if not feed.entries:
-                print(f"❌ No news found for {source}")
-                continue
-
-            for entry in feed.entries[:5]:  # ✅ Get top 5 articles per source
-                news_data.append({
-                    "source": source,
-                    "title": entry.title,
-                    "link": entry.link,
-                    "published": entry.published if "published" in entry else "Unknown"
-                })
-        except Exception as e:
-            print(f"❌ Error fetching RSS from {source}: {str(e)}")
+def fetch_and_store_rates():
+    """Fetches currency rates and stores them in Firebase."""
+    response = requests.get(API_URL)
     
-    return news_data
+    if response.status_code == 200:
+        data = response.json()
+        
+        if data.get("success"):
+            rates = data["rates"]
+            timestamp = datetime.utcnow()
 
-# ✅ Store News in Firebase
-def store_news_in_firebase():
-    news_items = fetch_rss_news()
-    if not news_items:
-        print("❌ No news items fetched.")
-        return
+            collection_ref.document("latest").set({
+                "base": BASE_CURRENCY,
+                "rates": rates,
+                "timestamp": timestamp.isoformat()
+            })
+            print("✅ Rates updated:", rates)
+            return rates
+        else:
+            print("❌ API Error:", data)
+            return None
+    else:
+        print("❌ HTTP Error:", response.status_code)
+        return None
+
+def get_cached_rates():
+    """Fetch cached rates if they are recent (within 15 mins)."""
+    doc = collection_ref.document("latest").get()
     
-    batch = db.batch()
-    collection_ref = db.collection("latest_news")
+    if doc.exists:
+        data = doc.to_dict()
+        last_updated = datetime.fromisoformat(data["timestamp"])
+        time_diff = datetime.utcnow() - last_updated
 
-    # ✅ Delete old news before inserting new ones
-    old_docs = collection_ref.stream()
-    for doc in old_docs:
-        doc.reference.delete()
+        if time_diff < timedelta(minutes=15):  # Use cache if data is fresh
+            print("♻️ Using cached rates")
+            return data["rates"]
+    
+    print("🌐 Fetching new rates...")
+    return fetch_and_store_rates()
 
-    # ✅ Store new news
-    for item in news_items:
-        doc_ref = collection_ref.document()
-        batch.set(doc_ref, item)
+@app.route("/currency_rates", methods=["GET"])
+def get_currency_rates():
+    """API endpoint for latest currency rates."""
+    rates = get_cached_rates()
+    if rates:
+        return jsonify({"success": True, "base": BASE_CURRENCY, "rates": rates})
+    else:
+        return jsonify({"success": False, "message": "Failed to fetch rates"}), 500
 
-    batch.commit()
-    print("✅ News updated in Firebase!")
-
-# ✅ Flask API Endpoint to Manually Trigger News Update
-@app.route('/update-news', methods=['GET'])
-def update_news():
-    try:
-        store_news_in_firebase()
-        return jsonify({"message": "✅ News updated successfully!"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ✅ API Endpoint to Fetch Latest News
-@app.route('/latest-news', methods=['GET'])
-def get_latest_news():
-    try:
-        docs = db.collection("latest_news").stream()
-        news_list = [doc.to_dict() for doc in docs]
-        return jsonify(news_list)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ✅ Background Task: Auto Update Every 30 Minutes
-def scheduled_news_update():
+def background_fetch():
+    """Runs in a separate thread to fetch currency data every 15 minutes."""
     while True:
-        store_news_in_firebase()
-        time.sleep(1800)  # ✅ Sleep for 30 minutes
+        fetch_and_store_rates()
+        time.sleep(900)  # 900 seconds = 15 minutes
 
-# ✅ Run Flask App
-if __name__ == '__main__':
-    import threading
-    threading.Thread(target=scheduled_news_update, daemon=True).start()  # ✅ Background Auto-Update
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    # Start background thread
+    threading.Thread(target=background_fetch, daemon=True).start()
+    
+    # Run Flask app
+    app.run(host="0.0.0.0", port=5000, debug=True)
