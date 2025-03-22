@@ -1,8 +1,6 @@
 flask
-yfinance
 gunicorn
 flask-cors
 firebase-admin
 requests
 schedule
-feedparser
